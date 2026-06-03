@@ -14,6 +14,14 @@ def generate_random_string(length=8):
     """Generates a random string for keys and values."""
     return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
 
+def encode_resp(*args) -> bytes:
+    """Helper to convert standard arguments into a RESP array."""
+    resp = f"*{len(args)}\r\n"
+    for arg in args:
+        arg_str = str(arg)
+        resp += f"${len(arg_str)}\r\n{arg_str}\r\n"
+    return resp.encode()
+
 async def worker(worker_id: int, requests_per_worker: int, latencies: list):
     """A single concurrent worker hitting the C++ server."""
     try:
@@ -28,22 +36,27 @@ async def worker(worker_id: int, requests_per_worker: int, latencies: list):
         is_set = random.random() < 0.2
         key = f"key:{random.randint(1, 1000)}"
         
+        # USE RESP ENCODING HERE
         if is_set:
             val = generate_random_string()
-            command = f"SET {key} {val}\n"
+            payload = encode_resp("SET", key, val)
         else:
-            command = f"GET {key}\n"
+            payload = encode_resp("GET", key)
 
         # Start timer for latency tracking
         start_time = time.perf_counter()
         
         # Send payload
-        writer.write(command.encode())
+        writer.write(payload)
         await writer.drain()
         
-        # Read response line
+        # Read the RESP response
         response = await reader.readline()
         
+        # If it's a bulk string, we need to read the actual data line too
+        if response.startswith(b'$') and response != b'$-1\r\n':
+            await reader.readline()
+            
         # End timer
         end_time = time.perf_counter()
         latencies.append(end_time - start_time)
@@ -73,17 +86,4 @@ async def main():
     # Calculate performance metrics
     total_duration = end_total_time - start_total_time
     ops_per_sec = len(latencies) / total_duration
-    avg_latency_ms = (sum(latencies) / len(latencies)) * 1000 if latencies else 0
-    
-    print("\n" + "="*30)
-    print("BENCHMARK RESULTS")
-    print("="*30)
-    print(f"Total Time Taken: {total_duration:.4f} seconds")
-    print(f"Successful Req:   {len(latencies)}")
-    print(f"Throughput:       {ops_per_sec:.2f} Ops/sec")
-    print(f"Avg Latency:      {avg_latency_ms:.4f} ms")
-    print("="*30)
-
-if __name__ == "__main__":
-    # Run the async event loop
-    asyncio.run(main())
+    avg_latency_ms = (sum(latencies) / len(latencies)) * 1000 if latencies else
