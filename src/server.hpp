@@ -8,8 +8,8 @@
 #include <thread>
 #include <atomic>
 #include <vector>
-#include <sys/types.h> // For pid_t
-#include <sys/wait.h>  // For waitpid()
+#include <sys/types.h>
+#include <sys/wait.h>
 #include "thread_pool.hpp"
 
 struct CacheValue {
@@ -36,13 +36,20 @@ private:
     
     std::thread eviction_thread_;
     std::atomic<bool> stop_eviction_{false};
-    
     std::atomic<pid_t> bgsave_pid_{-1}; 
+
+    std::vector<int> replica_fds_;
+    std::shared_mutex replica_mutex_;
+    std::thread replica_worker_;
+    std::atomic<bool> is_replica_{false};
+
+    void connect_to_master(std::string host, int port);
+    void broadcast_to_replicas(const std::string& resp_payload);
 
     void eviction_loop();
     void load_aof();
     void handle_client(int client_fd);
     
     std::vector<std::string> parse_resp(const std::string& input);
-    std::string process_command(const std::vector<std::string>& args);
+    std::string process_command(const std::vector<std::string>& args, int client_fd = -1);
 };
