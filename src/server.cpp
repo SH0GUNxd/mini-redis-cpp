@@ -13,9 +13,9 @@ Server::Server(int port)
     : port_(port), 
       server_fd_(-1), 
       thread_pool_(std::thread::hardware_concurrency()),
-      is_replica_(false),
       stop_eviction_(false),
-      bgsave_pid_(-1) 
+      bgsave_pid_(-1),
+      is_replica_(false)
 {
     load_aof();
     aof_stream_.open("mini-redis.aof", std::ios::app);
