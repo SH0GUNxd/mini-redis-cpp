@@ -1,0 +1,46 @@
+name: Mini-Redis CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install Test Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest
+
+    - name: Build and Start Server Container
+      # We specifically target the 'server' service so we don't accidentally run the benchmark in CI
+      run: docker-compose up -d --build server
+
+    - name: Wait for Server to Boot
+      # Give the C++ container a brief moment to compile, start, and bind to port 6379
+      run: sleep 5
+
+    - name: Run Integration Tests
+      # Run pytest. It will connect to 127.0.0.1:6379 which is mapped to the container
+      run: pytest tests/ -v
+
+    - name: View Server Logs (On Failure)
+      # If the tests fail, print the C++ server logs to help debug
+      if: failure()
+      run: docker-compose logs server
+
+    - name: Tear Down Infrastructure
+      if: always()
+      run: docker-compose down
