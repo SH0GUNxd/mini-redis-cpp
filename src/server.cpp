@@ -12,37 +12,55 @@ Server::Server(int port)
       server_fd_(-1), 
       thread_pool_(std::thread::hardware_concurrency()) 
 {
-    // 1. Load existing data from disk before doing anything else
     load_aof();
 
-    // 2. Open the AOF file in append mode. It stays open for the life of the server.
     aof_stream_.open("mini-redis.aof", std::ios::app);
     if (!aof_stream_.is_open()) {
         std::cerr << "CRITICAL: Failed to open AOF file for writing!\n";
     }
+
+    // Start the background eviction thread
+    eviction_thread_ = std::thread(&Server::eviction_loop, this);
 }
 
 Server::~Server() {
-    if (aof_stream_.is_open()) {
-        aof_stream_.close();
+    // Gracefully shut down the background thread
+    stop_eviction_ = true;
+    if (eviction_thread_.joinable()) {
+        eviction_thread_.join();
     }
-    if (server_fd_ != -1) {
-        close(server_fd_);
-        std::cout << "Server socket closed.\n";
+
+    if (aof_stream_.is_open()) aof_stream_.close();
+    if (server_fd_ != -1) close(server_fd_);
+}
+
+// Background thread that sweeps memory every 1 second
+void Server::eviction_loop() {
+    while (!stop_eviction_) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        auto now = std::chrono::steady_clock::now();
+
+        std::unique_lock<std::shared_mutex> lock(store_mutex_);
+        for (auto it = store_.begin(); it != store_.end(); ) {
+            if (it->second.has_ttl && it->second.expires_at <= now) {
+                // Write the deletion to disk so it doesn't revive on crash
+                if (aof_stream_.is_open()) {
+                    aof_stream_ << "DEL " << it->first << "\n";
+                    aof_stream_.flush();
+                }
+                it = store_.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
 }
 
 void Server::load_aof() {
     std::ifstream file("mini-redis.aof");
-    if (!file.is_open()) {
-        std::cout << "No existing AOF file found. Starting fresh.\n";
-        return;
-    }
+    if (!file.is_open()) return;
 
     std::string line;
-    int ops_restored = 0;
-    
-    // Read the file line by line and reconstruct the map
     while (std::getline(file, line)) {
         if (line.empty()) continue;
         
@@ -54,104 +72,130 @@ void Server::load_aof() {
             std::string key, value;
             iss >> key;
             std::getline(iss >> std::ws, value);
-            store_[key] = value;
-            ops_restored++;
+            store_[key] = {value, {}, false};
         } else if (command == "DEL") {
             std::string key;
             iss >> key;
             store_.erase(key);
-            ops_restored++;
+        } else if (command == "EXPIRE") {
+            std::string key;
+            int seconds;
+            iss >> key >> seconds;
+            auto it = store_.find(key);
+            if (it != store_.end()) {
+                it->second.has_ttl = true;
+                it->second.expires_at = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+            }
         }
     }
-    std::cout << "AOF Loaded: " << ops_restored << " operations restored into memory.\n";
 }
 
+// ... [Networking logic in start() and handle_client() remains EXACTLY the same] ...
 void Server::start() {
-    // ... [Networking logic remains exactly the same as Phase 3]
     server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd_ < 0) exit(EXIT_FAILURE);
-
     int opt = 1;
     setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
     struct sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(port_);
-
     bind(server_fd_, (struct sockaddr*)&address, sizeof(address));
     listen(server_fd_, 10);
-
-    std::cout << "Mini-Redis listening on port " << port_ 
-              << " with " << std::thread::hardware_concurrency() << " worker threads...\n";
+    std::cout << "Mini-Redis listening on port " << port_ << "...\n";
 
     while (true) {
         struct sockaddr_in client_address{};
         socklen_t client_addr_len = sizeof(client_address);
         int client_fd = accept(server_fd_, (struct sockaddr*)&client_address, &client_addr_len);
         if (client_fd < 0) continue;
-
-        thread_pool_.enqueue([this, client_fd]() {
-            this->handle_client(client_fd);
-        });
+        thread_pool_.enqueue([this, client_fd]() { this->handle_client(client_fd); });
     }
 }
 
 void Server::handle_client(int client_fd) {
-    // ... [Client loop remains exactly the same as Phase 3]
     char buffer[1024] = {0};
     while (true) {
         ssize_t bytes_read = read(client_fd, buffer, sizeof(buffer) - 1);
         if (bytes_read <= 0) break;
         buffer[bytes_read] = '\0';
-        
         std::string response = process_command(std::string(buffer));
         write(client_fd, response.c_str(), response.length());
     }
     close(client_fd);
 }
 
+
 std::string Server::process_command(const std::string& input) {
     std::istringstream iss(input);
     std::string command;
     iss >> command;
-
     std::transform(command.begin(), command.end(), command.begin(), ::toupper);
 
     if (command == "SET") {
         std::string key, value;
         iss >> key;
         std::getline(iss >> std::ws, value); 
-        
-        if (!value.empty() && value.back() == '\r') {
-            value.pop_back();
-        }
-
-        if (key.empty() || value.empty()) {
-            return "ERROR: SET requires a key and a value\n";
-        }
+        if (!value.empty() && value.back() == '\r') value.pop_back();
 
         std::unique_lock<std::shared_mutex> lock(store_mutex_);
-        store_[key] = value;
+        // Setting a key strips it of any previous TTL
+        store_[key] = {value, {}, false};
         
-        // PERSIST TO DISK
         if (aof_stream_.is_open()) {
             aof_stream_ << "SET " << key << " " << value << "\n";
-            aof_stream_.flush(); // Force write to OS buffer
+            aof_stream_.flush(); 
         }
-        
         return "OK\n";
+
+    } else if (command == "EXPIRE") {
+        std::string key;
+        int seconds;
+        iss >> key >> seconds;
+
+        std::unique_lock<std::shared_mutex> lock(store_mutex_);
+        auto it = store_.find(key);
+        if (it != store_.end()) {
+            it->second.has_ttl = true;
+            it->second.expires_at = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+            
+            if (aof_stream_.is_open()) {
+                aof_stream_ << "EXPIRE " << key << " " << seconds << "\n";
+                aof_stream_.flush();
+            }
+            return "OK\n";
+        }
+        return "NULL\n";
 
     } else if (command == "GET") {
         std::string key;
         iss >> key;
+        bool expired = false;
 
-        std::shared_lock<std::shared_mutex> lock(store_mutex_);
-        auto it = store_.find(key);
-        if (it != store_.end()) {
-            return it->second + "\n";
+        {
+            // First pass: Read lock
+            std::shared_lock<std::shared_mutex> lock(store_mutex_);
+            auto it = store_.find(key);
+            if (it != store_.end()) {
+                if (it->second.has_ttl && it->second.expires_at <= std::chrono::steady_clock::now()) {
+                    expired = true; // Mark for deletion, but don't delete yet
+                } else {
+                    return it->second.data + "\n";
+                }
+            } else {
+                return "NULL\n";
+            }
+        } // Read lock releases here
+
+        // Second pass: Lazy Eviction (Write lock)
+        if (expired) {
+            std::unique_lock<std::shared_mutex> lock(store_mutex_);
+            store_.erase(key);
+            if (aof_stream_.is_open()) {
+                aof_stream_ << "DEL " << key << "\n";
+                aof_stream_.flush();
+            }
+            return "NULL\n";
         }
-        return "NULL\n";
 
     } else if (command == "DEL") {
         std::string key;
@@ -159,18 +203,14 @@ std::string Server::process_command(const std::string& input) {
 
         std::unique_lock<std::shared_mutex> lock(store_mutex_);
         if (store_.erase(key)) {
-            
-            // PERSIST TO DISK
             if (aof_stream_.is_open()) {
                 aof_stream_ << "DEL " << key << "\n";
-                aof_stream_.flush(); // Force write to OS buffer
+                aof_stream_.flush();
             }
-            
             return "OK\n";
         }
         return "NULL\n";
-
-    } else {
-        return "ERROR: Unknown command\n";
     }
+    
+    return "ERROR: Unknown command\n";
 }
