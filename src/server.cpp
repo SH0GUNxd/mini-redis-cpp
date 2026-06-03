@@ -9,7 +9,14 @@
 #include <algorithm>
 #include <sys/wait.h>
 
-Server::Server(int port) : port_(port), server_fd_(-1), thread_pool_(std::thread::hardware_concurrency()) {
+Server::Server(int port) 
+    : port_(port), 
+      server_fd_(-1), 
+      thread_pool_(std::thread::hardware_concurrency()),
+      is_replica_(false),
+      stop_eviction_(false),
+      bgsave_pid_(-1) 
+{
     load_aof();
     aof_stream_.open("mini-redis.aof", std::ios::app);
     eviction_thread_ = std::thread(&Server::eviction_loop, this);
@@ -17,17 +24,30 @@ Server::Server(int port) : port_(port), server_fd_(-1), thread_pool_(std::thread
 
 Server::~Server() {
     stop_eviction_ = true;
-    if (eviction_thread_.joinable()) eviction_thread_.join();
+    if (eviction_thread_.joinable()) {
+        eviction_thread_.join();
+    }
     
-    // Clean up replication thread
+    // Safely wind down the replication thread if it was spawned
     is_replica_ = false;
-    if (replica_worker_.joinable()) replica_worker_.join();
+    if (replica_worker_.joinable()) {
+        replica_worker_.join();
+    }
 
-    if (aof_stream_.is_open()) aof_stream_.close();
+    if (aof_stream_.is_open()) {
+        aof_stream_.close();
+    }
     
-    // Close replica connections
-    for (int fd : replica_fds_) { close(fd); }
-    if (server_fd_ != -1) close(server_fd_);
+    // Safely lock and clear replica connections
+    std::unique_lock<std::shared_mutex> lock(replica_mutex_);
+    for (int fd : replica_fds_) { 
+        if (fd >= 0) close(fd); 
+    }
+    replica_fds_.clear();
+
+    if (server_fd_ != -1) {
+        close(server_fd_);
+    }
 }
 
 void Server::eviction_loop() {
