@@ -7,6 +7,7 @@
 #include <chrono>
 #include <thread>
 #include <atomic>
+#include <vector>
 #include "thread_pool.hpp"
 
 struct CacheValue {
@@ -27,10 +28,8 @@ private:
     int server_fd_;
     
     ThreadPool thread_pool_;
-    
     std::unordered_map<std::string, CacheValue> store_;
     std::shared_mutex store_mutex_;
-
     std::ofstream aof_stream_;
     
     std::thread eviction_thread_;
@@ -39,5 +38,7 @@ private:
 
     void load_aof();
     void handle_client(int client_fd);
-    std::string process_command(const std::string& input);
+    
+    std::vector<std::string> parse_resp(const std::string& input);
+    std::string process_command(const std::vector<std::string>& args);
 };
