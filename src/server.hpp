@@ -8,6 +8,8 @@
 #include <thread>
 #include <atomic>
 #include <vector>
+#include <sys/types.h> // For pid_t
+#include <sys/wait.h>  // For waitpid()
 #include "thread_pool.hpp"
 
 struct CacheValue {
@@ -34,8 +36,10 @@ private:
     
     std::thread eviction_thread_;
     std::atomic<bool> stop_eviction_{false};
-    void eviction_loop();
+    
+    std::atomic<pid_t> bgsave_pid_{-1}; 
 
+    void eviction_loop();
     void load_aof();
     void handle_client(int client_fd);
     

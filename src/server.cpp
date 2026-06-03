@@ -6,6 +6,7 @@
 #include <cstring>
 #include <sstream>
 #include <algorithm>
+#include <sys/wait.h> // Required for waitpid()
 
 Server::Server(int port) : port_(port), server_fd_(-1), thread_pool_(std::thread::hardware_concurrency()) {
     load_aof();
@@ -23,6 +24,19 @@ Server::~Server() {
 void Server::eviction_loop() {
     while (!stop_eviction_) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
+        
+        pid_t current_bgsave = bgsave_pid_.load();
+        if (current_bgsave != -1) {
+            int status;
+            // WNOHANG tells waitpid not to block our thread. It just checks if the child is done.
+            pid_t result = waitpid(current_bgsave, &status, WNOHANG);
+            if (result == current_bgsave) {
+                // Child finished successfully!
+                bgsave_pid_.store(-1);
+                std::cout << "[BGSAVE] Background snapshot finished successfully.\n";
+            }
+        }
+
         auto now = std::chrono::steady_clock::now();
         std::unique_lock<std::shared_mutex> lock(store_mutex_);
         for (auto it = store_.begin(); it != store_.end(); ) {
@@ -147,7 +161,42 @@ std::string Server::process_command(const std::vector<std::string>& args) {
 
     if (command == "PING") {
         return "+PONG\r\n"; // Simple String response
-    } 
+    }
+    
+    else if (command == "BGSAVE") {
+        // 1. Check if a save is already happening
+        if (bgsave_pid_.load() != -1) {
+            return "-ERR Background save already in progress\r\n";
+        }
+
+        // 2. Lock the map strictly during the fork to ensure memory state is stable
+        store_mutex_.lock(); 
+        pid_t pid = fork();
+
+        if (pid == 0) {
+            // CHILD PROCESS: We are now in the clone
+            std::ofstream rdb("dump.rdb", std::ios::trunc);
+            
+            for (const auto& [k, v] : store_) {
+                rdb << k << " " << v.data << "\n";
+            }
+            
+            rdb.flush();
+            rdb.close();
+
+            _exit(0); 
+
+        } else if (pid > 0) {
+            // PARENT PROCESS: Resume normal operations
+            bgsave_pid_.store(pid);
+            store_mutex_.unlock();
+            return "+Background saving started\r\n";
+        } else {
+            store_mutex_.unlock();
+            return "-ERR Failed to create background process\r\n";
+        }
+    }
+    
     else if (command == "SET") {
         if (args.size() < 3) return "-ERR wrong number of arguments for 'set' command\r\n";
         std::string key = args[1];
