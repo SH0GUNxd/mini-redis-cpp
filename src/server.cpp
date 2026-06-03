@@ -121,7 +121,7 @@ void Server::start() {
     struct sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(port_);
+    address.sin_port = htons(static_cast<uint16_t>(port_));
     bind(server_fd_, (struct sockaddr*)&address, sizeof(address));
     listen(server_fd_, 10);
     std::cout << "Mini-Redis listening on port " << port_ << "...\n";
@@ -147,7 +147,7 @@ void Server::connect_to_master(std::string host, int port) {
     int master_fd = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in serv_addr{};
     serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(port);
+    serv_addr.sin_port = htons(static_cast<uint16_t>(port));
     inet_pton(AF_INET, host.c_str(), &serv_addr.sin_addr);
 
     if (connect(master_fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
