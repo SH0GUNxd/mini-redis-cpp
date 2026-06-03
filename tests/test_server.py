@@ -79,3 +79,22 @@ def test_argument_validation(redis_client):
     # SET requires 3 arguments, we only send 2
     resp = send_cmd(redis_client, "SET", "only_key")
     assert resp.startswith("-ERR")
+    
+def test_bgsave_creates_snapshot(redis_client):
+    """Test that BGSAVE forks a process and writes dump.rdb to disk."""
+    # 1. Put some data in the database
+    send_cmd(redis_client, "SET", "backup_key", "important_data")
+    
+    # 2. Ensure any old dump file is removed before we test
+    if os.path.exists("dump.rdb"):
+        os.remove("dump.rdb")
+        
+    # 3. Trigger the background save
+    response = send_cmd(redis_client, "BGSAVE")
+    assert "+Background saving started" in response
+    
+    # 4. Wait a moment for the C++ child process to write to disk and exit
+    time.sleep(1.5)
+    
+    # 5. Verify the OS actually created the file
+    assert os.path.exists("dump.rdb"), "BGSAVE failed to create dump.rdb!"
