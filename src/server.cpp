@@ -178,8 +178,9 @@ void Server::load_aof()
     }
 }
 
-std::vector<std::string> Server::parse_resp(const std::string& input)
+std::vector<std::string> Server::parse_resp(const std::string& input, size_t& consumed)
 {
+    consumed = 0;
     std::vector<std::string> args;
     if (input.empty() || input[0] != '*')
         return args;
@@ -197,16 +198,19 @@ std::vector<std::string> Server::parse_resp(const std::string& input)
         for (int i = 0; i < num_args; ++i)
         {
             if (pos >= input.length() || input[pos] != '$')
-                break;
+                return {}; // incomplete
             pos++;
             crlf = input.find("\r\n", pos);
             if (crlf == std::string::npos)
-                break;
+                return {}; // incomplete
             int len = std::stoi(input.substr(pos, crlf - pos));
             pos = crlf + 2;
+            if (pos + static_cast<size_t>(len) + 2 > input.length())
+                return {}; // incomplete
             args.push_back(input.substr(pos, static_cast<size_t>(len)));
             pos += static_cast<size_t>(len) + 2;
         }
+        consumed = pos;
     }
     catch (const std::exception& e)
     {
@@ -311,8 +315,9 @@ void Server::connect_to_master(std::string host, int port)
         }
         buffer[static_cast<size_t>(bytes_read)] = '\0';
 
+        size_t consumed = 0;
         std::vector<std::string> args = parse_resp(
-            std::string(buffer.data(), static_cast<size_t>(bytes_read)));
+            std::string(buffer.data(), static_cast<size_t>(bytes_read)), consumed);
         if (!args.empty())
         {
             process_command(args,
@@ -337,59 +342,10 @@ void Server::handle_client(int client_fd)
         // Process all complete RESP messages in the accumulation buffer
         while (!accum.empty())
         {
-            // A complete RESP array needs at least one *N\r\n and all its bulk
-            // strings
-            std::vector<std::string> args = parse_resp(accum);
-            if (args.empty())
-                break; // incomplete message, wait for more data
-
-            // Consume the parsed message from the buffer
-            // Reconstruct how many bytes the message occupied
             size_t consumed = 0;
-            {
-                // Re-scan to find end of this RESP message
-                size_t pos = 1;
-                size_t crlf = accum.find("\r\n", pos);
-                if (crlf == std::string::npos)
-                    break;
-                int num_args = 0;
-                try
-                {
-                    num_args = std::stoi(accum.substr(pos, crlf - pos));
-                }
-                catch (...)
-                {
-                    accum.clear();
-                    break;
-                }
-                pos = crlf + 2;
-                for (int i = 0; i < num_args; ++i)
-                {
-                    if (pos >= accum.size() || accum[pos] != '$')
-                        break;
-                    pos++;
-                    crlf = accum.find("\r\n", pos);
-                    if (crlf == std::string::npos)
-                    {
-                        pos = 0;
-                        break;
-                    }
-                    int len = 0;
-                    try
-                    {
-                        len = std::stoi(accum.substr(pos, crlf - pos));
-                    }
-                    catch (...)
-                    {
-                        pos = 0;
-                        break;
-                    }
-                    pos = crlf + 2 + static_cast<size_t>(len) + 2;
-                }
-                consumed = pos;
-            }
-            if (consumed == 0 || consumed > accum.size())
-                break;
+            std::vector<std::string> args = parse_resp(accum, consumed);
+            if (args.empty() || consumed == 0)
+                break; // incomplete message, wait for more data
 
             std::string raw = accum.substr(0, consumed);
             accum.erase(0, consumed);
