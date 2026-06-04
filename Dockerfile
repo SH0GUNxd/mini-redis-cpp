@@ -18,7 +18,7 @@ COPY src/ ./src/
 
 # Compile the C++ application
 RUN mkdir build && cd build && \
-    cmake .. && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release && \
     make
 
 FROM ubuntu:22.04 AS runner
