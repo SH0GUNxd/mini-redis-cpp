@@ -1,6 +1,7 @@
 #include "server.hpp"
 
-int main() {
+int main()
+{
     Server server(6379);
     server.start();
     return 0;
