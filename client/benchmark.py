@@ -86,4 +86,21 @@ async def main():
     # Calculate performance metrics
     total_duration = end_total_time - start_total_time
     ops_per_sec = len(latencies) / total_duration
-    avg_latency_ms = (sum(latencies) / len(latencies)) * 1000 if latencies else
+    avg_latency_ms = (sum(latencies) / len(latencies)) * 1000 if latencies else 0
+
+    sorted_latencies = sorted(latencies)
+    p50 = sorted_latencies[int(len(sorted_latencies) * 0.50)] * 1000 if latencies else 0
+    p95 = sorted_latencies[int(len(sorted_latencies) * 0.95)] * 1000 if latencies else 0
+    p99 = sorted_latencies[int(len(sorted_latencies) * 0.99)] * 1000 if latencies else 0
+
+    print(f"\n--- Benchmark Results ---")
+    print(f"Total time:        {total_duration:.2f}s")
+    print(f"Requests done:     {len(latencies)}")
+    print(f"Throughput:        {ops_per_sec:.0f} ops/sec")
+    print(f"Avg latency:       {avg_latency_ms:.3f} ms")
+    print(f"p50 latency:       {p50:.3f} ms")
+    print(f"p95 latency:       {p95:.3f} ms")
+    print(f"p99 latency:       {p99:.3f} ms")
+
+if __name__ == "__main__":
+    asyncio.run(main())
