@@ -159,7 +159,7 @@ void Server::broadcast_to_replicas(const std::string& resp_payload) {
     std::shared_lock<std::shared_mutex> lock(replica_mutex_);
     for (int fd : replica_fds_) {
         // Send the exact RESP command to the replica
-        (void)write(fd, resp_payload.c_str(), resp_payload.length());
+        if (write(fd, resp_payload.c_str(), resp_payload.length()) < 0) {}
     }
 }
 
@@ -179,7 +179,7 @@ void Server::connect_to_master(std::string host, int port) {
     
     // Handshake: Tell the master we are a replica
     std::string handshake = "*1\r\n$12\r\nI_AM_REPLICA\r\n";
-    (void)write(master_fd, handshake.c_str(), handshake.length());
+    if (write(master_fd, handshake.c_str(), handshake.length()) < 0) {}
 
     // Enter a continuous loop to receive and apply broadcasted commands
     char buffer[4096] = {0};
@@ -225,7 +225,7 @@ void Server::handle_client(int client_fd) {
         
         // Only write back to normal clients. Replicas just stay connected silently.
         if (!response.empty()) {
-            (void)write(client_fd, response.c_str(), response.length());
+            if (write(client_fd, response.c_str(), response.length()) < 0) {}
         }
     }
     
