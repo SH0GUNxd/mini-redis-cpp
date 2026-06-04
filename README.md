@@ -195,7 +195,6 @@ Default configuration: 50 concurrent connections, 100,000 requests, RESP-complia
 
 ## Known Limitations
 
-- **No partial-write recovery on AOF** - if the process crashes mid-append, the trailing entry may be malformed on replay.
 - **Replication is fire-and-forget** - the master does not retry failed replica writes or track replication offset.
 - **Single-instance replication only** - `REPLICAOF` can only be called once per instance; chained replication is not supported.
 - **No AUTH, TLS, or access control** - not intended for production use.
