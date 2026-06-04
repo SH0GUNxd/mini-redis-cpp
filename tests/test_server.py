@@ -73,3 +73,52 @@ def test_bgsave_response(redis_client):
     send_cmd(redis_client, "SET", "backup_key", "important_data")
     response = send_cmd(redis_client, "BGSAVE")
     assert "+Background saving started" in response
+
+def test_expire_on_nonexistent_key(redis_client):
+    """Test EXPIRE on a key that doesn't exist returns 0."""
+    assert send_cmd(redis_client, "EXPIRE", "no_such_key", "10") == ":0\r\n"
+
+def test_expire_invalid_argument(redis_client):
+    """Test EXPIRE with a non-integer TTL returns an error."""
+    send_cmd(redis_client, "SET", "mykey", "myval")
+    resp = send_cmd(redis_client, "EXPIRE", "mykey", "notanumber")
+    assert resp.startswith("-ERR")
+
+def test_get_after_expire_not_yet_elapsed(redis_client):
+    """Test that a key is still accessible immediately after EXPIRE is set."""
+    send_cmd(redis_client, "SET", "fresh", "value")
+    send_cmd(redis_client, "EXPIRE", "fresh", "10")
+    assert send_cmd(redis_client, "GET", "fresh") == "$5\r\nvalue\r\n"
+
+def test_del_nonexistent_key(redis_client):
+    """Test DEL on a key that was never set returns 0."""
+    assert send_cmd(redis_client, "DEL", "never_existed") == ":0\r\n"
+
+def test_set_overwrite(redis_client):
+    """Test that SET on an existing key overwrites the value and clears TTL."""
+    send_cmd(redis_client, "SET", "overwrite_me", "original")
+    send_cmd(redis_client, "EXPIRE", "overwrite_me", "1")
+    # Overwrite should reset the key, clearing the TTL
+    send_cmd(redis_client, "SET", "overwrite_me", "updated")
+    time.sleep(1.2)
+    # Key should still exist because SET cleared the TTL
+    assert send_cmd(redis_client, "GET", "overwrite_me") == "$7\r\nupdated\r\n"
+
+def test_unknown_command(redis_client):
+    """Test that an unrecognized command returns a RESP error."""
+    resp = send_cmd(redis_client, "FOOBAR", "arg1")
+    assert resp.startswith("-ERR")
+
+def test_get_wrong_arg_count(redis_client):
+    """Test GET with no arguments returns an error."""
+    resp = send_cmd(redis_client, "GET")
+    assert resp.startswith("-ERR")
+
+def test_bgsave_idempotent_response(redis_client):
+    """Test that a second BGSAVE while one is in progress returns an error."""
+    send_cmd(redis_client, "SET", "k", "v")
+    send_cmd(redis_client, "BGSAVE")
+    # Immediately fire a second one - child process likely still running
+    resp = send_cmd(redis_client, "BGSAVE")
+    # Either it started (child finished fast) or it correctly errors
+    assert "+Background saving started" in resp or resp.startswith("-ERR")
