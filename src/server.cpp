@@ -205,7 +205,7 @@ void Server::start()
         server_fd_ = -1;
         return;
     }
-    if (listen(server_fd_, 10) < 0)
+    if (listen(server_fd_, SOMAXCONN) < 0)
     {
         std::cerr << "[FATAL] listen() failed: " << strerror(errno) << "\n";
         close(server_fd_);
