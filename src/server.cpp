@@ -1,5 +1,6 @@
 #include "server.hpp"
 #include <iostream>
+#include <vector>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -200,26 +201,27 @@ void Server::connect_to_master(std::string host, int port) {
 }
 
 void Server::handle_client(int client_fd) {
-    char buffer[4096] = {0}; 
+    std::vector<char> buffer(65536);
     while (true) {
-        ssize_t bytes_read = read(client_fd, buffer, sizeof(buffer) - 1);
+        ssize_t bytes_read = read(client_fd, buffer.data(), buffer.size() - 1);
         if (bytes_read <= 0) break;
-        buffer[bytes_read] = '\0';
-        
-        std::vector<std::string> args = parse_resp(std::string(buffer));
-        
+        buffer[static_cast<size_t>(bytes_read)] = '\0';
+
+        std::string raw(buffer.data(), static_cast<size_t>(bytes_read));
+        std::vector<std::string> args = parse_resp(raw);
+
         std::string response;
         if (args.empty()) {
             response = "-ERR Protocol error\r\n";
         } else {
             // Pass the client_fd so the parser can track replicas
-            response = process_command(args, client_fd); 
-            
+            response = process_command(args, client_fd);
+
             // If the command mutates state, reconstruct the RESP string and broadcast it
             std::string cmd = args[0];
             std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::toupper);
             if (cmd == "SET" || cmd == "DEL" || cmd == "EXPIRE") {
-                broadcast_to_replicas(std::string(buffer)); 
+                broadcast_to_replicas(raw);
             }
         }
         
@@ -260,23 +262,25 @@ std::string Server::process_command(const std::vector<std::string>& args, int cl
 
     else if (command == "BGSAVE") {
         if (bgsave_pid_.load() != -1) return "-ERR Background save already in progress\r\n";
-        store_mutex_.lock(); 
-        pid_t pid = fork();
 
-        if (pid == 0) {
-            std::ofstream rdb("dump.rdb", std::ios::trunc);
-            for (const auto& [k, v] : store_) rdb << k << " " << v.data << "\n";
-            rdb.flush();
-            rdb.close();
-            _exit(0); 
-        } else if (pid > 0) {
+        pid_t pid;
+        {
+            std::unique_lock<std::shared_mutex> lock(store_mutex_);
+            pid = fork();
+            if (pid == 0) {
+                std::ofstream rdb("dump.rdb", std::ios::trunc);
+                for (const auto& [k, v] : store_) rdb << k << " " << v.data << "\n";
+                rdb.flush();
+                rdb.close();
+                _exit(0);
+            }
+        } // lock released here before we check pid
+
+        if (pid > 0) {
             bgsave_pid_.store(pid);
-            store_mutex_.unlock();
             return "+Background saving started\r\n";
-        } else {
-            store_mutex_.unlock();
-            return "-ERR Failed to create background process\r\n";
         }
+        return "-ERR Failed to create background process\r\n";
     }
     
     else if (command == "SET") {

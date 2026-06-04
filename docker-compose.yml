@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   server:
     build: 
@@ -8,7 +6,7 @@ services:
     container_name: mini-redis-server
     ports:
       - "6379:6379"
-    restart: unless-stopped
+    restart: "no"
 
   benchmark:
     image: python:3.10-slim
@@ -19,6 +17,5 @@ services:
       - ./client:/app
     working_dir: /app
     environment:
-      # This matches the service name of our C++ container above
-      - REDIS_HOST=server 
+      - REDIS_HOST=server
     command: python benchmark.py
