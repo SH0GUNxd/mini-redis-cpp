@@ -169,11 +169,12 @@ void Server::load_aof()
 
     if (skipped > 0)
     {
-        std::cerr << "[AOF] Warning: " << skipped
-                  << " malformed entr" << (skipped == 1 ? "y" : "ies")
-                  << " skipped on replay. Truncating AOF to last valid state.\n";
-        std::filesystem::resize_file("mini-redis.aof",
-                                     static_cast<std::uintmax_t>(last_valid_pos));
+        std::cerr
+            << "[AOF] Warning: " << skipped << " malformed entr"
+            << (skipped == 1 ? "y" : "ies")
+            << " skipped on replay. Truncating AOF to last valid state.\n";
+        std::filesystem::resize_file(
+            "mini-redis.aof", static_cast<std::uintmax_t>(last_valid_pos));
     }
 }
 
