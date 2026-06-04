@@ -1,57 +1,59 @@
 # Mini-Redis
 
-A high-performance, multithreaded, in-memory key-value store built from scratch in Modern C++20.
+A multithreaded, in-memory key-value store built from scratch in C++20, implementing a subset of the Redis protocol.
 
-This project was developed to explore systems-level backend engineering, bypassing heavy frameworks to work directly with OS-level primitives. It acts as a fully functional Redis clone, complete with a custom POSIX socket TCP server, thread-safe memory management, durable disk persistence, time-to-live (TTL) eviction, and full compliance with the binary-safe RESP protocol.
+Built to explore systems-level backend engineering directly with OS primitives - no frameworks, no external dependencies beyond the C++ standard library. The server speaks real RESP, so it works with `redis-cli` and any standard Redis client out of the box.
 
 ---
 
-## Core Architecture & Features
+## Architecture
 
-### RESP Protocol Compliance
+### RESP Protocol Parser
 
-Implements a binary-safe REdis Serialization Protocol (RESP) parser. The server can be queried using the official `redis-cli` or any standard Redis client library in Python, Node.js, Go, Java, and more.
+Implements the REdis Serialization Protocol (RESP) with a stateful accumulation buffer per client connection, handling partial TCP reads correctly. Commands are parsed as binary-safe bulk string arrays.
 
-### Thread Pool Concurrency
+### Thread Pool
 
-Prevents expensive thread-spawning overhead by utilizing a pre-allocated worker pool backed by `std::condition_variable` and `std::mutex`.
+Incoming connections are dispatched to a fixed-size worker pool backed by `std::condition_variable` and `std::mutex`. Thread count defaults to `std::thread::hardware_concurrency()`, avoiding per-connection thread spawning overhead.
 
-### Lock-Free Reads
+### Reader-Writer Locking
 
-Uses C++20 `std::shared_mutex` (reader-writer locks) to allow unlimited concurrent `GET` operations while maintaining strict exclusivity for mutating commands such as `SET`, `DEL`, and `EXPIRE`.
+Uses `std::shared_mutex` to allow concurrent `GET` operations while serializing writes (`SET`, `DEL`, `EXPIRE`). AOF writes are protected by a separate `std::mutex` to avoid contention with store operations.
 
-### Disk Persistence (AOF)
+### Append-Only File (AOF) Persistence
 
-Implements an Append-Only File (AOF) persistence layer for crash recovery. Every mutating operation is appended to disk and replayed during startup to reconstruct the exact database state.
+Every mutating command is appended to `mini-redis.aof` and flushed to disk synchronously. On startup, the AOF is replayed to reconstruct the full database state.
 
-### Time-To-Live (TTL) Eviction
+### BGSAVE Snapshotting
 
-Supports Redis-style expiration through the `EXPIRE` command using `std::chrono`.
+`BGSAVE` forks a child process using `fork()`. The child serializes the current store to `dump.rdb` and exits, while the parent continues serving requests. The eviction thread reaps the child with `waitpid(WNOHANG)` to avoid zombie processes.
 
-The system employs a dual-eviction strategy:
+### TTL Eviction
 
-* **Lazy Eviction** – Expiration is checked during reads. Expired keys are deleted on access.
-* **Active Eviction** – A dedicated background thread periodically sweeps memory to remove expired keys proactively without impacting request handling.
+Two-pronged expiration strategy:
 
-### Containerized Infrastructure
+- **Lazy eviction** - expiry is checked on `GET`; expired keys are deleted on access.
+- **Active eviction** - a dedicated background thread sweeps the store every second and removes expired keys proactively.
 
-Fully containerized with Docker and Docker Compose using multi-stage builds for a minimal and secure production image.
+### Master-Replica Replication
 
-### Continuous Integration
+A running instance can be turned into a replica with `REPLICAOF <host> <port>`. The replica connects to the master, registers itself, and receives a live stream of mutating commands. The master broadcasts `SET`, `DEL`, and `EXPIRE` to all connected replicas after each write.
 
-Automated network-level integration tests executed through GitHub Actions to ensure protocol correctness, persistence reliability, and thread safety.
+### Containerized Deployment
+
+Multi-stage Docker build: a builder stage compiles the binary with GCC, a minimal runner stage copies only the binary. Docker Compose orchestrates the server and benchmark containers.
 
 ---
 
 ## Tech Stack
 
-| Category              | Technologies                                           |
-| --------------------- | ------------------------------------------------------ |
-| Server                | C++20, POSIX Sockets, CMake                            |
-| Concurrency           | `std::thread`, `std::shared_mutex`, Custom Thread Pool |
-| Client / Benchmarking | Python 3.10, `asyncio`, `socket`                       |
-| Testing               | `pytest`                                               |
-| DevOps                | Docker, Docker Compose, GitHub Actions                 |
+| Category    | Technologies                                           |
+|-------------|--------------------------------------------------------|
+| Server      | C++20, POSIX Sockets, CMake                            |
+| Concurrency | `std::thread`, `std::shared_mutex`, Custom Thread Pool |
+| Persistence | AOF (append-only log), RDB snapshot via `fork()`       |
+| Testing     | Python 3, `pytest`, `socket`                           |
+| DevOps      | Docker, Docker Compose, GitHub Actions                 |
 
 ---
 
@@ -60,13 +62,13 @@ Automated network-level integration tests executed through GitHub Actions to ens
 ```text
 mini-redis/
 ├── CMakeLists.txt         # Build configuration
-├── docker-compose.yml     # Infrastructure orchestration
 ├── Dockerfile             # Multi-stage builder and runtime image
+├── docker-compose.yml     # Infrastructure orchestration
 ├── src/
-│   ├── main.cpp           # Application entry point
-│   ├── server.hpp         # Server and protocol declarations
-│   ├── server.cpp         # Socket, AOF, RESP, and storage logic
-│   └── thread_pool.hpp    # Concurrent worker pool implementation
+│   ├── main.cpp           # Entry point
+│   ├── server.hpp         # Declarations
+│   ├── server.cpp         # Socket, RESP, storage, AOF, replication
+│   └── thread_pool.hpp    # Worker pool implementation
 ├── client/
 │   └── benchmark.py       # Async RESP load-testing utility
 └── tests/
@@ -77,75 +79,44 @@ mini-redis/
 
 ## Getting Started
 
-You can run the project locally on Linux/macOS or through Docker.
-
 ### Option 1: Docker (Recommended)
 
-Ensure Docker and Docker Compose are installed.
-
 ```bash
-# Build and launch the server + benchmark container
-docker-compose up --build
+docker compose up -d --build server
 ```
 
-**Note:** This command starts the C++ server and automatically runs the benchmark against it through Docker's internal bridge network.
-
-To run only the server in the background:
+To also run the benchmark:
 
 ```bash
-docker-compose up -d server
+docker compose up --build
 ```
-
----
 
 ### Option 2: Local Build (Linux/macOS)
 
-Requirements:
-
-* CMake
-* Make
-* GCC 11+ or Clang 13+
-* C++20-compatible compiler
-
-Build the project:
+Requirements: CMake, Make, GCC 11+ or Clang 13+
 
 ```bash
-mkdir build
-cd build
-
-cmake ..
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
 make
-```
-
-Run the server:
-
-```bash
 ./mini-redis
 ```
 
+> Debug builds enable AddressSanitizer and UBSan automatically via CMake.
+
 ---
 
-## Interacting with the Server
+## Connecting
 
-Because Mini-Redis implements the official RESP protocol, you can connect using the standard Redis CLI.
-
-Install Redis CLI:
-
-### Ubuntu / Debian
+Mini-Redis speaks RESP, so the standard Redis CLI works:
 
 ```bash
+# Ubuntu/Debian
 sudo apt install redis-tools
-```
 
-### macOS
-
-```bash
+# macOS
 brew install redis
-```
 
-Connect:
-
-```bash
 redis-cli -p 6379
 ```
 
@@ -153,19 +124,21 @@ redis-cli -p 6379
 
 ## Supported Commands
 
-| Command                  | Description                             |
-| ------------------------ | --------------------------------------- |
-| `PING`                   | Checks server liveness. Returns `PONG`. |
-| `SET <key> <value>`      | Stores a binary-safe key-value pair.    |
-| `GET <key>`              | Retrieves a value by key.               |
-| `DEL <key>`              | Deletes a key-value pair.               |
-| `EXPIRE <key> <seconds>` | Sets a TTL on a key.                    |
+| Command                  | Description                                          |
+|--------------------------|------------------------------------------------------|
+| `PING`                   | Liveness check. Returns `PONG`.                      |
+| `SET <key> <value>`      | Store a key-value pair.                              |
+| `GET <key>`              | Retrieve a value. Returns null if missing or expired.|
+| `DEL <key>`              | Delete a key. Returns count of deleted keys.         |
+| `EXPIRE <key> <seconds>` | Set a TTL on an existing key.                        |
+| `BGSAVE`                 | Fork a child process to write `dump.rdb` to disk.   |
+| `REPLICAOF <host> <port>`| Turn this instance into a replica of a master.       |
 
 ---
 
 ## Example Session
 
-```text
+```
 127.0.0.1:6379> PING
 PONG
 
@@ -178,72 +151,48 @@ OK
 127.0.0.1:6379> GET user:1
 "John Doe"
 
+# After TTL expires:
 127.0.0.1:6379> GET user:1
 (nil)
+
+127.0.0.1:6379> BGSAVE
+Background saving started
 ```
-
-*(The final GET is executed after the TTL expires.)*
-
----
-
-## Benchmarking
-
-To evaluate throughput and latency on your hardware, run the asynchronous benchmark utility while the server is running.
-
-```bash
-python3 client/benchmark.py
-```
-
-Default benchmark configuration:
-
-* 50 concurrent TCP connections
-* 100,000 requests
-* RESP-compliant request generation
-* Latency and throughput reporting
 
 ---
 
 ## Testing
 
-Integration tests are written with `pytest` and validate:
-
-* RESP protocol compliance
-* Network I/O correctness
-* Thread-safe concurrent operations
-* TTL expiration behavior
-* Persistence and recovery
-
-Install dependencies:
+Integration tests validate protocol correctness, TTL expiration, persistence, and argument validation over a real TCP connection.
 
 ```bash
 pip install pytest
-```
-
-Run the test suite:
-
-```bash
 pytest tests/ -v
 ```
 
+CI runs the full test suite on every push via GitHub Actions, building the server in a Docker container and running pytest against the exposed port.
+
 ---
 
-## Design Highlights
+## Benchmarking
 
-Mini-Redis focuses on demonstrating low-level systems programming concepts commonly used in high-performance backend infrastructure:
+```bash
+python3 client/benchmark.py
+```
 
-* TCP networking using POSIX sockets
-* Concurrent request processing with thread pools
-* Reader-writer locking using `std::shared_mutex`
-* Durable append-only persistence
-* TTL-based memory management
-* RESP protocol implementation from scratch
-* Containerized deployment pipelines
-* Automated integration testing
+Default configuration: 50 concurrent connections, 100,000 requests, RESP-compliant. Reports throughput and latency.
 
-The project intentionally avoids external frameworks and databases to expose the underlying mechanics behind modern in-memory data stores such as Redis.
+---
+
+## Known Limitations
+
+- **No partial-write recovery on AOF** - if the process crashes mid-append, the trailing entry may be malformed on replay.
+- **Replication is fire-and-forget** - the master does not retry failed replica writes or track replication offset.
+- **Single-instance replication only** - `REPLICAOF` can only be called once per instance; chained replication is not supported.
+- **No AUTH, TLS, or access control** - not intended for production use.
 
 ---
 
 ## License
 
-This project is intended for educational and portfolio purposes. Feel free to fork, modify, and extend it for your own learning.
+Educational and portfolio use. Fork freely.
