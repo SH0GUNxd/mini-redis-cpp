@@ -194,6 +194,7 @@ void Server::connect_to_master(std::string host, int port) {
 
     if (connect(master_fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
         std::cerr << "Failed to connect to master!\n";
+        close(master_fd);
         return;
     }
 
@@ -248,7 +249,10 @@ void Server::handle_client(int client_fd) {
         
         // Only write back to normal clients. Replicas just stay connected silently.
         if (!response.empty()) {
-            if (write(client_fd, response.c_str(), response.length()) < 0) {}
+            if (write(client_fd, response.c_str(), response.length()) < 0) {
+                std::cerr << "[WARN] write() to client failed: " << strerror(errno) << "\n";
+                break;
+            }
         }
     }
     
@@ -274,8 +278,13 @@ std::string Server::process_command(const std::vector<std::string>& args, int cl
     else if (command == "REPLICAOF") {
         if (args.size() != 3) return "-ERR syntax error\r\n";
         std::string host = args[1];
-        int port = std::stoi(args[2]);
-        
+        int port = 0;
+        try {
+            port = std::stoi(args[2]);
+        } catch (const std::exception&) {
+            return "-ERR value is not an integer or out of range\r\n";
+        }
+
         is_replica_ = true;
         replica_worker_ = std::thread(&Server::connect_to_master, this, host, port);
         return "+OK\r\n";
@@ -322,7 +331,12 @@ std::string Server::process_command(const std::vector<std::string>& args, int cl
     else if (command == "EXPIRE") {
         if (args.size() != 3) return "-ERR wrong number of arguments\r\n";
         std::string key = args[1];
-        int seconds = std::stoi(args[2]);
+        int seconds = 0;
+        try {
+            seconds = std::stoi(args[2]);
+        } catch (const std::exception&) {
+            return "-ERR value is not an integer or out of range\r\n";
+        }
 
         std::unique_lock<std::shared_mutex> lock(store_mutex_);
         auto it = store_.find(key);
@@ -364,9 +378,10 @@ std::string Server::process_command(const std::vector<std::string>& args, int cl
                 aof_stream_ << "DEL " << key << "\n";
                 aof_stream_.flush();
             }
-            return "$-1\r\n"; 
+            return "$-1\r\n";
         }
-    } 
+        return "$-1\r\n"; // unreachable but satisfies compiler
+    }
     else if (command == "DEL") {
         if (args.size() != 2) return "-ERR wrong number of arguments\r\n";
         std::string key = args[1];
