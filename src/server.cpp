@@ -112,24 +112,29 @@ void Server::load_aof() {
 
 std::vector<std::string> Server::parse_resp(const std::string& input) {
     std::vector<std::string> args;
-    if (input.empty() || input[0] != '*') return args; 
+    if (input.empty() || input[0] != '*') return args;
 
-    size_t pos = 1;
-    size_t crlf = input.find("\r\n", pos);
-    if (crlf == std::string::npos) return args;
+    try {
+        size_t pos = 1;
+        size_t crlf = input.find("\r\n", pos);
+        if (crlf == std::string::npos) return args;
 
-    int num_args = std::stoi(input.substr(pos, crlf - pos));
-    pos = crlf + 2;
-
-    for (int i = 0; i < num_args; ++i) {
-        if (pos >= input.length() || input[pos] != '$') break;
-        pos++;
-        crlf = input.find("\r\n", pos);
-        if (crlf == std::string::npos) break;
-        int len = std::stoi(input.substr(pos, crlf - pos));
+        int num_args = std::stoi(input.substr(pos, crlf - pos));
         pos = crlf + 2;
-        args.push_back(input.substr(pos, len));
-        pos += len + 2; 
+
+        for (int i = 0; i < num_args; ++i) {
+            if (pos >= input.length() || input[pos] != '$') break;
+            pos++;
+            crlf = input.find("\r\n", pos);
+            if (crlf == std::string::npos) break;
+            int len = std::stoi(input.substr(pos, crlf - pos));
+            pos = crlf + 2;
+            args.push_back(input.substr(pos, static_cast<size_t>(len)));
+            pos += static_cast<size_t>(len) + 2;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[WARN] parse_resp failed: " << e.what() << "\n";
+        return {};
     }
     return args;
 }
@@ -137,14 +142,30 @@ std::vector<std::string> Server::parse_resp(const std::string& input) {
 
 void Server::start() {
     server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd_ < 0) {
+        std::cerr << "[FATAL] socket() failed: " << strerror(errno) << "\n";
+        return;
+    }
     int opt = 1;
-    setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    if (setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        std::cerr << "[WARN] setsockopt() failed: " << strerror(errno) << "\n";
+    }
     struct sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(static_cast<uint16_t>(port_));
-    bind(server_fd_, (struct sockaddr*)&address, sizeof(address));
-    listen(server_fd_, 10);
+    if (bind(server_fd_, (struct sockaddr*)&address, sizeof(address)) < 0) {
+        std::cerr << "[FATAL] bind() failed on port " << port_ << ": " << strerror(errno) << "\n";
+        close(server_fd_);
+        server_fd_ = -1;
+        return;
+    }
+    if (listen(server_fd_, 10) < 0) {
+        std::cerr << "[FATAL] listen() failed: " << strerror(errno) << "\n";
+        close(server_fd_);
+        server_fd_ = -1;
+        return;
+    }
     std::cout << "Mini-Redis listening on port " << port_ << "...\n";
 
     while (true) {
@@ -183,16 +204,16 @@ void Server::connect_to_master(std::string host, int port) {
     if (write(master_fd, handshake.c_str(), handshake.length()) < 0) {}
 
     // Enter a continuous loop to receive and apply broadcasted commands
-    char buffer[4096] = {0};
+    std::vector<char> buffer(65536);
     while (is_replica_) {
-        ssize_t bytes_read = read(master_fd, buffer, sizeof(buffer) - 1);
+        ssize_t bytes_read = read(master_fd, buffer.data(), buffer.size() - 1);
         if (bytes_read <= 0) {
             std::cout << "Master disconnected.\n";
             break;
         }
-        buffer[bytes_read] = '\0';
-        
-        std::vector<std::string> args = parse_resp(std::string(buffer));
+        buffer[static_cast<size_t>(bytes_read)] = '\0';
+
+        std::vector<std::string> args = parse_resp(std::string(buffer.data(), static_cast<size_t>(bytes_read)));
         if (!args.empty()) {
             process_command(args, -1); // Process silently, don't write back to master
         }
