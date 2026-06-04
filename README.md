@@ -182,6 +182,18 @@ python3 client/benchmark.py
 
 Default configuration: 50 concurrent connections, 100,000 requests, RESP-compliant. Reports throughput and latency.
 
+**Results on Windows/WSL2 (Docker):**
+
+| Metric        | Value      |
+|---------------|------------|
+| Throughput    | 9,534 ops/sec |
+| Avg latency   | 3.163 ms   |
+| p50 latency   | 1.520 ms   |
+| p95 latency   | 1.854 ms   |
+| p99 latency   | 2.158 ms   |
+
+> Measured over 100,000 requests (80% GET / 20% SET) via Docker on Windows. Latency is higher than bare-metal Linux due to WSL2 networking overhead - native Linux results would be significantly better.
+
 ---
 
 ## Known Limitations
