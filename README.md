@@ -184,15 +184,12 @@ Default configuration: 50 concurrent connections, 100,000 requests, RESP-complia
 
 **Results on Windows/WSL2 (Docker):**
 
-| Metric        | Value      |
-|---------------|------------|
-| Throughput    | 9,534 ops/sec |
-| Avg latency   | 3.163 ms   |
-| p50 latency   | 1.520 ms   |
-| p95 latency   | 1.854 ms   |
-| p99 latency   | 2.158 ms   |
+| Pass                         | Throughput     | Avg latency | p50       | p95       | p99       |
+|------------------------------|----------------|-------------|-----------|-----------|-----------|
+| Latency (per-request drain)  | 9,499 ops/sec  | 3.191 ms    | 1.532 ms  | 1.842 ms  | 2.132 ms  |
+| Throughput (pipeline size=32)| 9,090 ops/sec  |            |          |          |          |
 
-> Measured over 100,000 requests (80% GET / 20% SET) via Docker on Windows. Latency is higher than bare-metal Linux due to WSL2 networking overhead - native Linux results would be significantly better.
+> Measured over 100,000 requests (80% GET / 20% SET) via Docker on Windows. The pipelined pass shows no throughput gain over the latency pass, indicating the bottleneck is server-side (mutex contention) rather than client-side flushing - as expected under WSL2. Native Linux bare-metal results would be significantly higher.
 
 ---
 
