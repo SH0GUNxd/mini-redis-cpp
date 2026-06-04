@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <netinet/in.h>
 #include <sstream>
@@ -105,40 +106,74 @@ void Server::load_aof()
     std::ifstream file("mini-redis.aof");
     if (!file.is_open())
         return;
+
     std::string line;
+    std::streampos last_valid_pos = 0;
+    int skipped = 0;
+
     while (std::getline(file, line))
     {
         if (line.empty())
+        {
+            last_valid_pos = file.tellg();
             continue;
+        }
+
         std::istringstream iss(line);
         std::string command;
         iss >> command;
+        bool valid = false;
+
         if (command == "SET")
         {
             std::string key, value;
-            iss >> key;
-            std::getline(iss >> std::ws, value);
-            store_[key] = { value, {}, false };
+            if (iss >> key && std::getline(iss >> std::ws, value)
+                && !key.empty() && !value.empty())
+            {
+                store_[key] = { value, {}, false };
+                valid = true;
+            }
         }
         else if (command == "DEL")
         {
             std::string key;
-            iss >> key;
-            store_.erase(key);
+            if (iss >> key && !key.empty())
+            {
+                store_.erase(key);
+                valid = true;
+            }
         }
         else if (command == "EXPIRE")
         {
             std::string key;
-            int seconds;
-            iss >> key >> seconds;
-            auto it = store_.find(key);
-            if (it != store_.end())
+            int seconds = 0;
+            if (iss >> key >> seconds && !key.empty() && seconds > 0)
             {
-                it->second.has_ttl = true;
-                it->second.expires_at = std::chrono::steady_clock::now()
-                    + std::chrono::seconds(seconds);
+                auto it = store_.find(key);
+                if (it != store_.end())
+                {
+                    it->second.has_ttl = true;
+                    it->second.expires_at = std::chrono::steady_clock::now()
+                        + std::chrono::seconds(seconds);
+                }
+                valid = true;
             }
         }
+
+        if (valid)
+            last_valid_pos = file.tellg();
+        else
+            ++skipped;
+    }
+    file.close();
+
+    if (skipped > 0)
+    {
+        std::cerr << "[AOF] Warning: " << skipped
+                  << " malformed entr" << (skipped == 1 ? "y" : "ies")
+                  << " skipped on replay. Truncating AOF to last valid state.\n";
+        std::filesystem::resize_file("mini-redis.aof",
+                                     static_cast<std::uintmax_t>(last_valid_pos));
     }
 }
 
