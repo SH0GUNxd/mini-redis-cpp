@@ -70,6 +70,7 @@ void Server::eviction_loop() {
         for (auto it = store_.begin(); it != store_.end(); ) {
             if (it->second.has_ttl && it->second.expires_at <= now) {
                 if (aof_stream_.is_open()) {
+                    std::unique_lock<std::mutex> aof_lock(aof_mutex_);
                     aof_stream_ << "DEL " << it->first << "\n";
                     aof_stream_.flush();
                 }
@@ -223,38 +224,66 @@ void Server::connect_to_master(std::string host, int port) {
 }
 
 void Server::handle_client(int client_fd) {
-    std::vector<char> buffer(65536);
+    std::vector<char> chunk(4096);
+    std::string accum;
+
     while (true) {
-        ssize_t bytes_read = read(client_fd, buffer.data(), buffer.size() - 1);
+        ssize_t bytes_read = read(client_fd, chunk.data(), chunk.size());
         if (bytes_read <= 0) break;
-        buffer[static_cast<size_t>(bytes_read)] = '\0';
+        accum.append(chunk.data(), static_cast<size_t>(bytes_read));
 
-        std::string raw(buffer.data(), static_cast<size_t>(bytes_read));
-        std::vector<std::string> args = parse_resp(raw);
+        // Process all complete RESP messages in the accumulation buffer
+        while (!accum.empty()) {
+            // A complete RESP array needs at least one *N\r\n and all its bulk strings
+            std::vector<std::string> args = parse_resp(accum);
+            if (args.empty()) break; // incomplete message, wait for more data
 
-        std::string response;
-        if (args.empty()) {
-            response = "-ERR Protocol error\r\n";
-        } else {
-            // Pass the client_fd so the parser can track replicas
-            response = process_command(args, client_fd);
+            // Consume the parsed message from the buffer
+            // Reconstruct how many bytes the message occupied
+            size_t consumed = 0;
+            {
+                // Re-scan to find end of this RESP message
+                size_t pos = 1;
+                size_t crlf = accum.find("\r\n", pos);
+                if (crlf == std::string::npos) break;
+                int num_args = 0;
+                try { num_args = std::stoi(accum.substr(pos, crlf - pos)); }
+                catch (...) { accum.clear(); break; }
+                pos = crlf + 2;
+                for (int i = 0; i < num_args; ++i) {
+                    if (pos >= accum.size() || accum[pos] != '$') break;
+                    pos++;
+                    crlf = accum.find("\r\n", pos);
+                    if (crlf == std::string::npos) { pos = 0; break; }
+                    int len = 0;
+                    try { len = std::stoi(accum.substr(pos, crlf - pos)); }
+                    catch (...) { pos = 0; break; }
+                    pos = crlf + 2 + static_cast<size_t>(len) + 2;
+                }
+                consumed = pos;
+            }
+            if (consumed == 0 || consumed > accum.size()) break;
 
-            // If the command mutates state, reconstruct the RESP string and broadcast it
+            std::string raw = accum.substr(0, consumed);
+            accum.erase(0, consumed);
+
+            std::string response = process_command(args, client_fd);
+
             std::string cmd = args[0];
             std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::toupper);
             if (cmd == "SET" || cmd == "DEL" || cmd == "EXPIRE") {
                 broadcast_to_replicas(raw);
             }
-        }
-        
-        // Only write back to normal clients. Replicas just stay connected silently.
-        if (!response.empty()) {
-            if (write(client_fd, response.c_str(), response.length()) < 0) {
-                std::cerr << "[WARN] write() to client failed: " << strerror(errno) << "\n";
-                break;
+
+            if (!response.empty()) {
+                if (write(client_fd, response.c_str(), response.length()) < 0) {
+                    std::cerr << "[WARN] write() to client failed: " << strerror(errno) << "\n";
+                    goto disconnect;
+                }
             }
         }
     }
+    disconnect:
     
     // If a client disconnects, check if it was a replica and remove it
     std::unique_lock<std::shared_mutex> lock(replica_mutex_);
@@ -285,7 +314,12 @@ std::string Server::process_command(const std::vector<std::string>& args, int cl
             return "-ERR value is not an integer or out of range\r\n";
         }
 
-        is_replica_ = true;
+        if (is_replica_.exchange(true)) {
+            return "-ERR already a replica\r\n";
+        }
+        if (replica_worker_.joinable()) {
+            replica_worker_.join();
+        }
         replica_worker_ = std::thread(&Server::connect_to_master, this, host, port);
         return "+OK\r\n";
     }
@@ -322,8 +356,9 @@ std::string Server::process_command(const std::vector<std::string>& args, int cl
         store_[key] = {value, {}, false};
         
         if (aof_stream_.is_open() && !is_replica_) {
+            std::unique_lock<std::mutex> aof_lock(aof_mutex_);
             aof_stream_ << "SET " << key << " " << value << "\n";
-            aof_stream_.flush(); 
+            aof_stream_.flush();
         }
         return "+OK\r\n";
 
@@ -344,6 +379,7 @@ std::string Server::process_command(const std::vector<std::string>& args, int cl
             it->second.has_ttl = true;
             it->second.expires_at = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
             if (aof_stream_.is_open() && !is_replica_) {
+                std::unique_lock<std::mutex> aof_lock(aof_mutex_);
                 aof_stream_ << "EXPIRE " << key << " " << seconds << "\n";
                 aof_stream_.flush();
             }
@@ -375,6 +411,7 @@ std::string Server::process_command(const std::vector<std::string>& args, int cl
             std::unique_lock<std::shared_mutex> lock(store_mutex_);
             store_.erase(key);
             if (aof_stream_.is_open() && !is_replica_) {
+                std::unique_lock<std::mutex> aof_lock(aof_mutex_);
                 aof_stream_ << "DEL " << key << "\n";
                 aof_stream_.flush();
             }
@@ -389,6 +426,7 @@ std::string Server::process_command(const std::vector<std::string>& args, int cl
         std::unique_lock<std::shared_mutex> lock(store_mutex_);
         if (store_.erase(key)) {
             if (aof_stream_.is_open() && !is_replica_) {
+                std::unique_lock<std::mutex> aof_lock(aof_mutex_);
                 aof_stream_ << "DEL " << key << "\n";
                 aof_stream_.flush();
             }

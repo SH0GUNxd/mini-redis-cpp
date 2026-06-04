@@ -8,7 +8,7 @@
 #include <thread>
 #include <atomic>
 #include <vector>
-#include <sys/types.h>
+#include <mutex>
 #include <sys/wait.h>
 #include "thread_pool.hpp"
 
@@ -33,6 +33,7 @@ private:
     std::unordered_map<std::string, CacheValue> store_;
     std::shared_mutex store_mutex_;
     std::ofstream aof_stream_;
+    std::mutex aof_mutex_;
     
     std::thread eviction_thread_;
     std::atomic<bool> stop_eviction_{false};
