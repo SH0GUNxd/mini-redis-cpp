@@ -195,8 +195,8 @@ Default configuration: 50 concurrent connections, 100,000 requests, RESP-complia
 
 | Pass                         | Throughput     | Avg latency | p50       | p95       | p99       |
 |------------------------------|----------------|-------------|-----------|-----------|-----------|
-| Latency (per-request drain)  | 41,505 ops/sec  | 0.683 ms    | 0.184 ms  | 0.200 ms  | 0.255 ms  |
-| Throughput (pipeline size=32)| 5,470 ops/sec  |            |          |          |          |
+| Latency (per-request drain)  | 68,672 ops/sec  | 0.530 ms    | 0.184 ms  | 0.200 ms  | 0.255 ms  |
+| Throughput (pipeline size=32)| 12,726 ops/sec  |            |          |          |          |
 
 > Measured over 100,000 requests (80% GET / 20% SET) via Docker on Linux. Notably, the pipelined pass shows a severe degradation in throughput compared to the latency pass (dropping from ~41.5k to ~5.4k ops/sec). Rather than improving performance, batching requests exposes a significant server-side bottleneck-likely severe lock/mutex contention or an issue within the pipeline parsing logic under this environment (managed school hardware with potential resource throttling). Native Linux bare-metal results would be expected to perform better.
 
