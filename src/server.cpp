@@ -178,7 +178,8 @@ void Server::load_aof()
     }
 }
 
-std::vector<std::string> Server::parse_resp(const std::string& input, size_t& consumed)
+std::vector<std::string> Server::parse_resp(const std::string& input,
+                                            size_t& consumed)
 {
     consumed = 0;
     std::vector<std::string> args;
@@ -317,7 +318,8 @@ void Server::connect_to_master(std::string host, int port)
 
         size_t consumed = 0;
         std::vector<std::string> args = parse_resp(
-            std::string(buffer.data(), static_cast<size_t>(bytes_read)), consumed);
+            std::string(buffer.data(), static_cast<size_t>(bytes_read)),
+            consumed);
         if (!args.empty())
         {
             process_command(args,
